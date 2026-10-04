@@ -20,15 +20,37 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS stores (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
+  name_i18n TEXT DEFAULT '{}',
   code TEXT UNIQUE,
   owner TEXT
+);
+
+CREATE TABLE IF NOT EXISTS languages (
+  code TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  is_default INTEGER DEFAULT 0,
+  sort_order INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS biz_config (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  epc_prefix TEXT DEFAULT 'E280',
+  seq_bits INTEGER DEFAULT 8
+);
+
+CREATE TABLE IF NOT EXISTS categories (
+  code TEXT PRIMARY KEY,
+  names TEXT NOT NULL DEFAULT '{}',
+  sort_order INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS products (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   code TEXT UNIQUE NOT NULL,
   name TEXT NOT NULL,
+  name_i18n TEXT DEFAULT '{}',
   category TEXT DEFAULT '黄金',
+  category_code TEXT DEFAULT '',
   material TEXT DEFAULT '',
   weight REAL DEFAULT 0,
   size TEXT DEFAULT '',
@@ -41,6 +63,7 @@ CREATE TABLE IF NOT EXISTS products (
   showcase_public INTEGER DEFAULT 0,
   showcase_order INTEGER DEFAULT 0,
   showcase_desc TEXT DEFAULT '',
+  showcase_desc_i18n TEXT DEFAULT '{}',
   origin TEXT DEFAULT '',
   created TEXT DEFAULT (datetime('now','localtime'))
 );
@@ -329,6 +352,10 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         ("products", "showcase_desc", "TEXT DEFAULT ''"),
         ("products", "origin", "TEXT DEFAULT ''"),
         ("products", "high_value", "INTEGER DEFAULT 0"),
+        ("products", "name_i18n", "TEXT DEFAULT '{}'"),
+        ("products", "category_code", "TEXT DEFAULT ''"),
+        ("products", "showcase_desc_i18n", "TEXT DEFAULT '{}'"),
+        ("stores", "name_i18n", "TEXT DEFAULT '{}'"),
         ("tenant_profiles", "showcase_title", "TEXT DEFAULT '新品橱窗'"),
         ("tenant_profiles", "showcase_subtitle", "TEXT DEFAULT '本周臻品 · 限量发售'"),
     ]
@@ -399,59 +426,78 @@ def seed_demo(conn: sqlite3.Connection) -> None:
     stores = [("总店", "HQ", "管理员"), ("分店A", "A001", "店长小张")]
     conn.executemany("INSERT INTO stores(name,code,owner) VALUES(?,?,?)", stores)
 
+    # 语言
+    conn.execute("INSERT OR IGNORE INTO languages(code,name,is_default,sort_order) VALUES('zh','中文',1,1)")
+    conn.execute("INSERT OR IGNORE INTO languages(code,name,is_default,sort_order) VALUES('it','Italiano',0,2)")
+    conn.execute("INSERT OR IGNORE INTO languages(code,name,is_default,sort_order) VALUES('en','English',0,3)")
+    # 业务配置
+    conn.execute("INSERT OR IGNORE INTO biz_config(id,epc_prefix,seq_bits) VALUES(1,'E280',8)")
+    # 分类（多语言）
+    categories = [
+        ("01", '{"zh":"黄金","it":"Oro","en":"Gold"}', 1),
+        ("02", '{"zh":"钻石","it":"Diamante","en":"Diamond"}', 2),
+        ("03", '{"zh":"翡翠","it":"Giada","en":"Jadeite"}', 3),
+        ("04", '{"zh":"铂金","it":"Platino","en":"Platinum"}', 4),
+        ("05", '{"zh":"彩宝","it":"Pietre colorate","en":"Colored gems"}', 5),
+        ("06", '{"zh":"银饰","it":"Argento","en":"Silver"}', 6),
+        ("07", '{"zh":"珍珠","it":"Perla","en":"Pearl"}', 7),
+        ("99", '{"zh":"其他","it":"Altro","en":"Other"}', 99),
+    ]
+    conn.executemany("INSERT OR IGNORE INTO categories(code,names,sort_order) VALUES(?,?,?)", categories)
+
     products = [
         # J001 - 足金手镯 (1)
-        ("J001", "足金手镯", "黄金", "足金999", 28.6, "56号", "GDH-88231", 18500, 21800, "在库", 1, "E28011606000020999A1C14501", 1, 1,
+        ("J001", "足金手镯", '{"zh":"足金手镯"}', "黄金", "01", "Au999", 28.6, "56号", "GDH-88231", 18500, 21800, "在库", 1, "E28011606000020999A1C14501", 1, 1,
          "产地：深圳水贝｜材质：足金999｜金重：28.60g｜尺寸：56号｜经典光面圆条，福韵满堂，妈妈婚嫁首选｜参考价：¥21,800",
          "深圳·水贝"),
         # J002 - 钻石耳钉 (2)
-        ("J002", "钻石耳钉", "钻石", "18K金+钻石", 2.4, "单只", "DZ-12034", 3200, 4280, "在库", 1, "", 1, 2,
+        ("J002", "钻石耳钉", '{"zh":"钻石耳钉"}', "钻石", "02", "18K Gold+Diamond", 2.4, "单只", "DZ-12034", 3200, 4280, "在库", 1, "", 1, 2,
          "产地：比利时安特卫普｜材质：18K金镶嵌30分天然真钻｜金重：2.40g｜H色VVS净度｜通勤百搭，闪耀出众｜参考价：¥4,280",
          "比利时·安特卫普"),
         # J003 - 翡翠吊坠 (3)
-        ("J003", "翡翠观音吊坠", "翡翠", "冰种飘绿", 12.8, "", "FC-55410", 6800, 8600, "在库", 1, "", 1, 3,
+        ("J003", "翡翠观音吊坠", '{"zh":"翡翠观音吊坠"}', "翡翠", "03", "Jadeite", 12.8, "", "FC-55410", 6800, 8600, "在库", 1, "", 1, 3,
          "产地：缅甸帕敢｜材质：天然A货冰种翡翠｜总重：12.80g｜飘绿花雕，观音慈面，护佑平安｜附国检证书｜参考价：¥8,600",
          "缅甸·帕敢"),
         # J004 - 铂金项链 (4)
-        ("J004", "铂金肖邦项链", "铂金", "PT950", 9.2, "45cm", "BJ-20988", 7200, 8900, "在库", 1, "", 1, 4,
+        ("J004", "铂金肖邦项链", '{"zh":"铂金肖邦项链"}', "铂金", "04", "PT950", 9.2, "45cm", "BJ-20988", 7200, 8900, "在库", 1, "", 1, 4,
          "产地：上海老庙｜材质：PT950 铂金｜金重：9.20g｜链长：45cm｜肖邦链柔韧有光，日常轻奢｜参考价：¥8,900",
          "上海·老庙"),
         # J005 - 彩宝戒指 (5)
-        ("J005", "红碧玺彩宝戒指", "彩宝", "18K金+红碧玺", 3.1, "13号", "CB-77421", 4100, 5600, "在库", 2, "", 1, 5,
+        ("J005", "红碧玺彩宝戒指", '{"zh":"红碧玺彩宝戒指"}', "彩宝", "05", "18K Gold+Rubellite", 3.1, "13号", "CB-77421", 4100, 5600, "在库", 2, "", 1, 5,
          "产地：巴西米纳斯｜材质：18K金+3.2ct天然红碧玺｜金重：3.10g｜13号戒圈｜旺运招财，女王气场｜参考价：¥5,600",
          "巴西·米纳斯"),
         # J006 - 黄金吊坠（已定，不进橱窗）
-        ("J006", "黄金福字吊坠", "黄金", "足金999", 6.8, "", "GDH-90344", 4600, 5600, "已定", 1, "E28011606000020999A1C14588", 0, 0, "",
+        ("J006", "黄金福字吊坠", '{"zh":"黄金福字吊坠"}', "黄金", "01", "Au999", 6.8, "", "GDH-90344", 4600, 5600, "已定", 1, "E28011606000020999A1C14588", 0, 0, "",
          "深圳·水贝"),
         # J007 - 银质对戒 (6)
-        ("J007", "银质一生一世对戒", "其他", "925银", 8.5, "17号", "AG-12098", 900, 1280, "在库", 2, "", 1, 6,
+        ("J007", "银质一生一世对戒", '{"zh":"银质一生一世对戒"}', "银饰", "06", "Sterling Silver", 8.5, "17号", "AG-12098", 900, 1280, "在库", 2, "", 1, 6,
          "产地：广州番禺｜材质：925纯银镀铂金｜总重：8.50g｜17号戒圈｜刻字「一生一世」，情侣首选｜参考价：¥1,280",
          "广州·番禺"),
         # J008 - 古法黄金 (7)
-        ("J008", "古法黄金传承手串", "黄金", "足金999 古法", 42.3, "18cm", "GDH-98771", 26800, 32600, "在库", 1, "", 1, 7,
+        ("J008", "古法黄金传承手串", '{"zh":"古法黄金传承手串"}', "黄金", "01", "Au999", 42.3, "18cm", "GDH-98771", 26800, 32600, "在库", 1, "", 1, 7,
          "产地：深圳百泰｜材质：足金999 古法工艺｜金重：42.30g｜18cm手围｜哑光磨砂，传家臻品｜参考价：¥32,600",
          "深圳·百泰"),
         # J009 - 祖母绿吊坠 (8)
-        ("J009", "祖母绿锁骨链", "彩宝", "18K金+祖母绿", 2.8, "42cm", "CB-98211", 9800, 12800, "在库", 1, "", 1, 8,
+        ("J009", "祖母绿锁骨链", '{"zh":"祖母绿锁骨链"}', "彩宝", "05", "18K Gold+Emerald", 2.8, "42cm", "CB-98211", 9800, 12800, "在库", 1, "", 1, 8,
          "产地：哥伦比亚｜材质：18K金镶嵌1.8ct天然祖母绿｜金重：2.80g｜42cm锁骨链｜高贵典雅，收藏级｜参考价：¥12,800",
          "哥伦比亚·木佐"),
         # J0095 - 蓝宝戒指 (9)
-        ("J0095", "蓝宝石戒指", "彩宝", "18K金+斯里兰卡蓝宝", 3.5, "15号", "CB-77520", 8200, 10800, "在库", 1, "", 1, 9,
+        ("J0095", "蓝宝石戒指", '{"zh":"蓝宝石戒指"}', "彩宝", "05", "18K Gold+Sapphire", 3.5, "15号", "CB-77520", 8200, 10800, "在库", 1, "", 1, 9,
          "产地：斯里兰卡｜材质：18K金+2.5ct皇家蓝蓝宝石｜金重：3.50g｜15号戒圈｜丝绒皇家蓝，尊贵非凡｜参考价：¥10,800",
          "斯里兰卡·拉特纳普勒"),
         # J010 - 和田玉 (10)
-        ("J010", "和田玉平安扣", "翡翠", "和田玉羊脂玉", 15.6, "", "FC-88211", 5800, 7800, "在库", 1, "", 1, 10,
+        ("J010", "和田玉平安扣", '{"zh":"和田玉平安扣"}', "翡翠", "03", "Nephrite", 15.6, "", "FC-88211", 5800, 7800, "在库", 1, "", 1, 10,
          "产地：新疆和田｜材质：和田玉羊脂白玉｜总重：15.60g｜平安扣圆圆满满，馈赠长辈佳品｜附鉴定证书｜参考价：¥7,800",
          "新疆·和田"),
         # J011 - 珍珠项链 (不进橱窗)
-        ("J011", "珍珠项链", "其他", "南洋金珠+925银", 0, "45cm", "", 2600, 3600, "在库", 2, "", 0, 0, "",
+        ("J011", "珍珠项链", '{"zh":"珍珠项链"}', "珍珠", "07", "South Sea Pearl+925 Silver", 0, "45cm", "", 2600, 3600, "在库", 2, "", 0, 0, "",
          "菲律宾·巴拉望"),
     ]
     conn.executemany(
         """INSERT INTO products
-            (code,name,category,material,weight,size,cert,cost,price,status,store_id,rfid_epc,
+            (code,name,name_i18n,category,category_code,material,weight,size,cert,cost,price,status,store_id,rfid_epc,
              showcase_public,showcase_order,showcase_desc,origin)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         products,
     )
 
