@@ -59,7 +59,6 @@ class MainActivity : AppCompatActivity() {
     private var abnormalTab = false
     private var rulesOpen = false
 
-    private var pending = LinkedHashMap<String, Int>() // 待上报 EPC->RSSI
     private var lastNetworkOk = false
     private var lastTriggerDownAt = 0L
 
@@ -80,11 +79,10 @@ class MainActivity : AppCompatActivity() {
         val code = res.contents?.trim().orEmpty()
         if (code.isNotEmpty()) {
             when (ApiClient.qrKind(code)) {
-                ApiClient.QR_CO -> {
-                    prefs.serverUrl = ApiClient.normalize(code)
-                    doJoin(autoSnapshot = true)
+                ApiClient.QR_TASK -> {
+                    prefs.origin = ApiClient.normalize(code)
+                    startTask()
                 }
-                ApiClient.QR_LEGACY -> toast(R.string.qr_legacy_hint)
                 else -> toast(R.string.qr_unknown_hint)
             }
         }
@@ -148,7 +146,7 @@ class MainActivity : AppCompatActivity() {
                 if (rulesOpen) R.string.rules_fold else R.string.rules_expand)
         }
         findViewById<TextView>(R.id.btnJoin).setOnClickListener { scanJoinQr() }
-        findViewById<TextView>(R.id.btnDownload).setOnClickListener { downloadSnapshot() }
+        findViewById<TextView>(R.id.btnDownload).setOnClickListener { finishTask() }
         // 屏幕模拟扳机：点按=扣下扳机（开始扫描），再点按=停止；与机身扳机同一套状态机
         btnTrigger.setOnClickListener {
             onTriggerDown()
@@ -187,10 +185,7 @@ class MainActivity : AppCompatActivity() {
     private fun restoreSnapshot() {
         if (prefs.snapshotJson.isNotBlank()) {
             val n = engine.loadSnapshot(prefs.snapshotJson)
-            if (n > 0) {
-                snapshotReady = true
-                engine.initHighValueUnscanned()
-            }
+            if (n > 0) snapshotReady = true
         }
         if (prefs.deviceNo > 0) tvDeviceNo.text = getString(R.string.device_me, prefs.deviceNo)
         else tvDeviceNo.setText(R.string.device_none)
@@ -209,90 +204,57 @@ class MainActivity : AppCompatActivity() {
         qrLauncher.launch(opts)
     }
 
-    private fun doJoin(autoSnapshot: Boolean) {
-        if (!api.isConfigured) {
-            toast(R.string.need_join); return
-        }
+    private fun startTask() {
+        if (prefs.origin.isBlank()) { toast(R.string.need_join); return }
         net.execute {
             try {
-                val j = api.join()
-                val no = j.optInt("device_no")
-                val isActive = j.optBoolean("active", false)
-                val status = j.optString("status")
-                val taskNo = j.optString("task_no")
-                // 加入的是已结束的旧任务：旧 key 作废，必须扫码加入新任务
-                if (isDone(status)) {
-                    main.post {
-                        prefs.serverUrl = ""
-                        leaveTask(true)
-                    }
-                    return@execute
-                }
-                val isNewTask = taskNo.isNotEmpty() && taskNo != prefs.taskNo
-                if (isNewTask) {
-                    prefs.pullSinceId = 0
-                    prefs.snapshotJson = ""
-                    prefs.offlineQueue = "[]"
-                    engine.reset()
-                    snapshotReady = false
-                }
-                prefs.deviceNo = no
-                prefs.taskNo = taskNo
+                api.login("admin", "123456")
+                val t = api.createTask()
+                val tid = t.optInt("task_id")
+                prefs.taskId = tid
+                prefs.taskNo = t.optString("task_no")
+                val items = t.optJSONArray("items") ?: JSONArray()
+                prefs.snapshotJson = items.toString()
+                val n = engine.loadSnapshot(items.toString())
                 main.post {
-                    if (isNewTask) pending.clear()
                     joined = true
-                    active = isActive
+                    active = true
+                    snapshotReady = n > 0
                     lastNetworkOk = true
-                    tvDeviceNo.text = getString(R.string.device_me, no)
-                    toast(getString(R.string.joined_ok, no))
-                    if (isNewTask || autoSnapshot) downloadSnapshot()
+                    tvDeviceNo.text = getString(R.string.device_me, prefs.deviceNo)
+                    toast(getString(R.string.snapshot_downloaded, n))
                     refreshUi()
                 }
             } catch (e: Exception) {
                 main.post {
                     lastNetworkOk = false
                     joined = false
-                    val msg = e.message ?: "join error"
-                    // 密钥无效/任务不存在：旧任务已失效，完整复位并清空地址，下次点按钮直接重新扫码
-                    if (e.invalidTaskKey()) {
-                        prefs.serverUrl = ""
-                        leaveTask(false)
-                        toast(R.string.qr_invalid_key)
-                    } else {
-                        toast(msg)
-                        refreshUi()
-                    }
+                    toast(e.message ?: "task error")
+                    refreshUi()
                 }
             }
         }
     }
 
     private fun downloadSnapshot() {
-        if (!api.isConfigured) { toast(R.string.need_join); return }
+        if (prefs.taskId <= 0) { toast(R.string.need_join); return }
         net.execute {
             try {
-                val s = api.snapshot()
-                val status = s.optString("status")
-                if (isDone(status)) {
-                    main.post { prefs.serverUrl = ""; leaveTask(true) }
-                    return@execute
-                }
+                val s = api.getItems(prefs.taskId)
                 val items = s.optJSONArray("items") ?: JSONArray()
                 prefs.snapshotJson = items.toString()
                 val n = engine.loadSnapshot(items.toString())
-                engine.initHighValueUnscanned()
                 main.post {
                     snapshotReady = n > 0
                     lastNetworkOk = true
-                    if (!joined) joined = true
-                    active = s.optString("status") == "进行中"
                     toast(getString(R.string.snapshot_downloaded, n))
                     refreshUi()
                 }
             } catch (e: Exception) {
                 main.post {
-                    if (e.invalidTaskKey()) { prefs.serverUrl = ""; leaveTask(false) }
-                    else { lastNetworkOk = false; toast(e.message ?: "snapshot error"); refreshUi() }
+                    lastNetworkOk = false
+                    toast(e.message ?: "snapshot error")
+                    refreshUi()
                 }
             }
         }
@@ -302,8 +264,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun canScan() = joined && active && snapshotReady
 
-    /** 旧任务已完成（主管核对确认/强制终止）或旧 key 已失效：彻底退出任务态。
-     *  清空保存的任务地址，下一次盘点必须重新扫码加入新任务，避免拿着旧任务直接开扫。 */
+    /** 退出盘点任务，清空本地状态。 */
     private fun leaveTask(showHint: Boolean) {
         val wasInTask = joined || snapshotReady || prefs.snapshotJson.isNotBlank()
         if (scanning) {
@@ -313,24 +274,38 @@ class MainActivity : AppCompatActivity() {
         joined = false
         active = false
         snapshotReady = false
-        pending.clear()
         engine.reset()
-        prefs.serverUrl = ""
         prefs.taskNo = ""
+        prefs.taskId = 0
         prefs.snapshotJson = ""
-        prefs.pullSinceId = 0
-        prefs.offlineQueue = "[]"
-        prefs.deviceNo = 0
         tvDeviceNo.setText(R.string.device_none)
         lastNetworkOk = true
         refreshUi()
         if (showHint && wasInTask) toast(R.string.task_rescan)
     }
 
+    /** 完成盘点：上报最终结果并展示盘盈盘亏。 */
+    private fun finishTask() {
+        if (prefs.taskId <= 0) { toast(R.string.need_join); return }
+        if (scanning) { scanning = false; RfidManager.stop() }
+        flushUploads(blocking = true)
+        net.execute {
+            try {
+                val resp = api.finish(prefs.taskId)
+                val surplus = resp.optJSONArray("surplus") ?: JSONArray()
+                val shortage = resp.optJSONArray("shortage") ?: JSONArray()
+                main.post {
+                    active = false
+                    toast("盘盈${surplus.length()} 盘亏${shortage.length()}")
+                    leaveTask(false)
+                }
+            } catch (e: Exception) {
+                main.post { toast(e.message ?: "finish error") }
+            }
+        }
+    }
+
     private fun isDone(status: String?) = status == "已完成"
-    private fun Exception.invalidTaskKey() =
-        (message ?: "").let { it.contains("403") || it.contains("404") }
-    private fun Exception.taskClosed() = (message ?: "").contains("409")
 
     private fun startScan() {
         if (!canScan()) { toast(R.string.need_join); return }
@@ -359,12 +334,9 @@ class MainActivity : AppCompatActivity() {
 
         val r = engine.onSelfScan(epc, rssi, hhmmss.format(java.util.Date()))
         when (r) {
-            1 -> { beep(); pending[epc] = rssi }
-            2 -> { beep(); abnormalFeedback(); pending[epc] = rssi }
-            0 -> {
-                if (!prefs.dedup) beep()
-                pending[epc] = rssi // 重复也上传，服务端去重；流量可接受
-            }
+            1 -> beep()
+            2 -> { beep(); abnormalFeedback() }
+            0 -> { if (!prefs.dedup) beep() }
         }
         refreshUi()
     }
@@ -396,63 +368,37 @@ class MainActivity : AppCompatActivity() {
         refreshUi()
     }
 
-    // -------------------------------- 上报 / 拉取 循环
+    // -------------------------------- 上报循环
 
     private fun startLoops() {
         main.post(object : Runnable {
             override fun run() {
-                if (scanning || pending.isNotEmpty()) flushUploads(blocking = false)
+                if (joined && active) flushUploads(blocking = false)
                 main.postDelayed(this, 1200)
-            }
-        })
-        main.post(object : Runnable {
-            override fun run() {
-                if (joined) pullOthers()
-                main.postDelayed(this, (prefs.pullInterval.coerceAtLeast(5)) * 1000L)
-            }
-        })
-        main.post(object : Runnable {
-            override fun run() {
-                if (joined) pollTask()
-                main.postDelayed(this, 20000)
             }
         })
     }
 
     private fun flushUploads(blocking: Boolean) {
-        if (pending.isEmpty()) return
-        val batch = ArrayList(pending.entries)
+        val seqs = engine.collectSeqs()
+        val unknownEpcs = engine.collectUnknownEpcs()
+        if (seqs.isEmpty() && unknownEpcs.isEmpty()) return
+        if (prefs.taskId <= 0) return
         val action = Runnable {
             try {
-                val tags = batch.map { it.key to it.value }
-                val resp = api.scan(tags)
-                val global = resp.optInt("global_count", engine.globalScanned)
+                val resp = api.scan(prefs.taskId, seqs, unknownEpcs)
+                val found = resp.optInt("found")
+                val unknown = resp.optInt("unknown")
                 main.post {
-                    batch.forEach { pending.remove(it.key) }
-                    engine.globalScanned = global
                     lastNetworkOk = true
                     engine.online = true
-                    prefs.offlineQueue = "[]"
                     refreshUi()
                 }
             } catch (e: Exception) {
                 main.post {
-                    if (e.invalidTaskKey()) {
-                        prefs.serverUrl = ""
-                        leaveTask(false)
-                    } else if (e.taskClosed()) {
-                        // 主管已结束任务：服务端拒绝上传（409），立即停止扫描并丢弃待传批次
-                        active = false
-                        pending.clear()
-                        prefs.offlineQueue = "[]"
-                        if (scanning) pauseScan() else refreshUi()
-                        toast(R.string.task_stopped_remote)
-                    } else {
-                        lastNetworkOk = false
-                        engine.online = false
-                        persistOffline()
-                        refreshUi()
-                    }
+                    lastNetworkOk = false
+                    engine.online = false
+                    refreshUi()
                 }
             }
         }
@@ -460,79 +406,6 @@ class MainActivity : AppCompatActivity() {
             val f = net.submit(action)
             try { f.get(6, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Exception) {}
         } else net.execute(action)
-    }
-
-    private fun persistOffline() {
-        val arr = JSONArray()
-        pending.keys.forEach { arr.put(it) }
-        prefs.offlineQueue = arr.toString()
-    }
-
-    private fun pullOthers() {
-        if (!api.isConfigured) return
-        net.execute {
-            try {
-                val resp = api.pull(prefs.pullSinceId)
-                val status = resp.optString("status")
-                if (isDone(status)) {
-                    main.post { prefs.serverUrl = ""; leaveTask(true) }
-                    return@execute
-                }
-                val items = resp.optJSONArray("items") ?: JSONArray()
-                var maxId = resp.optInt("max_id", prefs.pullSinceId)
-                var changed = false
-                for (i in 0 until items.length()) {
-                    val o = items.getJSONObject(i)
-                    engine.mergeOther(o.optString("epc"), o.optInt("device_no"))
-                    changed = true
-                }
-                if (maxId > prefs.pullSinceId) prefs.pullSinceId = maxId
-                val isActive = status == "进行中"
-                main.post {
-                    lastNetworkOk = true
-                    engine.online = true
-                    active = isActive
-                    if (!isActive && scanning) pauseScan()
-                    if (changed) refreshList()
-                    refreshUi()
-                }
-            } catch (e: Exception) {
-                main.post {
-                    if (e.invalidTaskKey()) { prefs.serverUrl = ""; leaveTask(false) }
-                    else { lastNetworkOk = false; engine.online = false; refreshUi() }
-                }
-            }
-        }
-    }
-
-    private fun pollTask() {
-        if (!api.isConfigured) return
-        net.execute {
-            try {
-                val t = api.task()
-                val isActive = t.optBoolean("active", false)
-                val status = t.optString("status")
-                main.post {
-                    lastNetworkOk = true
-                    // 任务已完成（主管核对确认或强制终止）：退出旧任务，必须扫码加入下一次任务
-                    if (isDone(status)) {
-                        prefs.serverUrl = ""
-                        leaveTask(true)
-                        return@post
-                    }
-                    if (joined && !isActive && active) {
-                        pauseScan()
-                        toast(if (status == "待核对") R.string.task_waiting else R.string.task_ended)
-                    }
-                    active = isActive
-                    refreshUi()
-                }
-            } catch (e: Exception) {
-                main.post {
-                    if (e.invalidTaskKey()) { prefs.serverUrl = ""; leaveTask(false) }
-                }
-            }
-        }
     }
 
     // -------------------------------- 反馈
@@ -704,13 +577,6 @@ class MainActivity : AppCompatActivity() {
         tvUhf.setText(if (RfidManager.ready) R.string.uhf_ok else R.string.uhf_none)
         tvUhf.setTextColor(getColor(if (RfidManager.ready) R.color.green else R.color.text_hint))
         tvPower.text = "${prefs.power}dBm"
-
-        // 高价值提醒
-        val hv = engine.countHighValueUnscanned()
-        if (hv > 0 && prefs.highValueRemind) {
-            tvHv.visibility = View.VISIBLE
-            tvHv.text = getString(R.string.hv_alert, hv)
-        } else tvHv.visibility = View.GONE
 
         // 扫描按钮：扫描中红色，待扫绿色，未加入任务蓝色（点按直接扫码加入）。
         // 无 UHF 模块的手机：任务内点按即开摄像头连续扫条码（onTriggerDown 内分流）

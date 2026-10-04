@@ -90,7 +90,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun loadValues() {
-        etUrl.setText(prefs.serverUrl)
+        etUrl.setText(prefs.origin)
         skPull.progress = (prefs.pullInterval - 5).coerceIn(0, 115)
         skPower.progress = (prefs.power - 5).coerceIn(0, 25)
         spRegion.setSelection(prefs.region.coerceIn(0, 5))
@@ -112,7 +112,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun save() {
-        prefs.serverUrl = etUrl.text.toString().trim()
+        prefs.origin = etUrl.text.toString().trim()
         prefs.pullInterval = skPull.progress + 5
         prefs.power = skPower.progress + 5
         prefs.region = spRegion.selectedItemPosition
