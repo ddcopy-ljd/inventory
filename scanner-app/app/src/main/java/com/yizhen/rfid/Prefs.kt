@@ -10,6 +10,21 @@ class Prefs(context: Context) {
         get() = sp.getString("server_url", "") ?: ""
         set(v) = sp.edit().putString("server_url", v.trim()).apply()
 
+    /** 服务端 origin（如 http://host:port）。 */
+    var origin: String
+        get() = sp.getString("origin", "") ?: ""
+        set(v) = sp.edit().putString("origin", v.trim()).apply()
+
+    /** 登录后的认证 token。 */
+    var token: String
+        get() = sp.getString("token", "") ?: ""
+        set(v) = sp.edit().putString("token", v).apply()
+
+    /** 当前盘点任务 ID。 */
+    var taskId: Int
+        get() = sp.getInt("task_id", 0)
+        set(v) = sp.edit().putInt("task_id", v).apply()
+
     var pullInterval: Int
         get() = sp.getInt("pull_interval", 15)
         set(v) = sp.edit().putInt("pull_interval", v).apply()

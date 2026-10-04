@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 import uvicorn
@@ -34,7 +35,7 @@ FRONTEND_DIR = ROOT / "frontend"
 LOGO_DIR = ROOT / "logo"
 
 HOST = os.environ.get("HOST", "127.0.0.1")
-PORT = int(os.environ.get("PORT", "8000"))
+PORT = int(os.environ.get("PORT", "8002"))
 # 平台启动时注入 TENANT_DB_DIR；独立运行时该变量为空 → 进入 STANDALONE 模式
 MODE = "STANDALONE" if not os.environ.get("TENANT_DB_DIR") else "PLATFORM"
 
@@ -44,6 +45,7 @@ FEATURES = [
 ]
 
 app = FastAPI(title="懿臻珠宝云", docs_url="/docs", redoc_url=None)
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 _sessions: dict[str, dict] = {}
 _lock = threading.Lock()
@@ -1029,6 +1031,122 @@ def rfid_scan(body: RfidScanIn, request: Request):
             "shortage": shortage,
             "items": scanned + surplus + shortage,
         }
+
+
+# ---------------------------------------------------------------- 盘点任务（手持机序列号方案）
+
+@app.post("/api/inventory/tasks")
+def inventory_task_create(request: Request):
+    op = _require_auth(request)
+    with _db(request) as conn:
+        _assert_stock_unfrozen(conn)
+        items = conn.execute(
+            "SELECT id, code, name, rfid_epc, status FROM products "
+            "WHERE status IN ('在库','已定','借出') AND rfid_epc!='' ORDER BY id"
+        ).fetchall()
+        seq_map = {}
+        task_items = []
+        for i, r in enumerate(items, 1):
+            seq_map[r["rfid_epc"]] = i
+            task_items.append({"seq": i, "epc": r["rfid_epc"]})
+        task_no = f"PD{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        cur = conn.execute(
+            "INSERT INTO inventory_tasks(task_no,status,operator,created_at) VALUES(?,?,?,?)",
+            (task_no, "scanning", op["username"], datetime.now().isoformat()),
+        )
+        tid = cur.lastrowid
+        for r in items:
+            conn.execute(
+                "INSERT INTO inventory_task_items(task_id,seq,product_id,code,name,epc,book_status) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (tid, seq_map[r["rfid_epc"]], r["id"], r["code"], r["name"], r["rfid_epc"], r["status"]),
+            )
+        conn.commit()
+        return {"task_id": tid, "task_no": task_no, "total": len(items), "items": task_items}
+
+
+@app.get("/api/inventory/tasks/{tid}/items")
+def inventory_task_items(tid: int, request: Request):
+    _require_auth(request)
+    with _db(request) as conn:
+        rows = conn.execute(
+            "SELECT seq, epc FROM inventory_task_items WHERE task_id=? ORDER BY seq", (tid,)
+        ).fetchall()
+        return {"items": [{"seq": r["seq"], "epc": r["epc"]} for r in rows]}
+
+
+class TaskScanIn(BaseModel):
+    seqs: list[int] = Field(default_factory=list)
+    unknown_epcs: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/inventory/tasks/{tid}/scan")
+def inventory_task_scan(tid: int, body: TaskScanIn, request: Request):
+    _require_auth(request)
+    with _db(request) as conn:
+        for s in body.seqs:
+            conn.execute(
+                "UPDATE inventory_task_items SET scan_status='found', scanned_at=? WHERE task_id=? AND seq=?",
+                (datetime.now().isoformat(), tid, s),
+            )
+        for epc in body.unknown_epcs:
+            conn.execute(
+                "INSERT OR IGNORE INTO inventory_task_unknown(task_id,epc) VALUES(?,?)",
+                (tid, epc),
+            )
+        conn.commit()
+        found = conn.execute(
+            "SELECT COUNT(*) FROM inventory_task_items WHERE task_id=? AND scan_status='found'", (tid,)
+        ).fetchone()[0]
+        unknown = conn.execute(
+            "SELECT COUNT(*) FROM inventory_task_unknown WHERE task_id=?", (tid,)
+        ).fetchone()[0]
+        return {"found": found, "unknown": unknown}
+
+
+@app.post("/api/inventory/tasks/{tid}/finish")
+def inventory_task_finish(tid: int, request: Request):
+    op = _require_auth(request)
+    with _db(request) as conn:
+        surplus = conn.execute(
+            "SELECT epc FROM inventory_task_unknown WHERE task_id=?", (tid,)
+        ).fetchall()
+        shortage = conn.execute(
+            "SELECT code, name, epc FROM inventory_task_items "
+            "WHERE task_id=? AND (scan_status IS NULL OR scan_status='pending') AND seq>0",
+            (tid,),
+        ).fetchall()
+        conn.execute(
+            "UPDATE inventory_tasks SET status='done', finished_at=? WHERE id=?",
+            (datetime.now().isoformat(), tid),
+        )
+        conn.commit()
+        _log(conn, op["username"], "盘点完成", f"盘盈{len(surplus)} 盘亏{len(shortage)}")
+        return {
+            "task_id": tid,
+            "surplus": [{"epc": r["epc"]} for r in surplus],
+            "shortage": [{"code": r["code"], "name": r["name"], "epc": r["epc"]} for r in shortage],
+        }
+
+
+@app.post("/api/inventory/tasks/{tid}/cancel")
+def inventory_task_cancel(tid: int, request: Request):
+    op = _require_auth(request)
+    with _db(request) as conn:
+        conn.execute("UPDATE inventory_tasks SET status='cancelled' WHERE id=?", (tid,))
+        conn.commit()
+        _log(conn, op["username"], "盘点取消", f"任务{tid}")
+        return {"ok": True}
+
+
+@app.get("/api/inventory/lock-status")
+def inventory_lock_status(request: Request):
+    _require_auth(request)
+    with _db(request) as conn:
+        row = conn.execute(
+            "SELECT id, task_no FROM inventory_tasks WHERE status='scanning' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return {"locked": row is not None, "task": dict(row) if row else None}
 
 
 # ---------------------------------------------------------------- 标签排版打印
